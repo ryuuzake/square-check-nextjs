@@ -1,73 +1,84 @@
-import { DrizzleAdapter } from "@auth/drizzle-adapter";
-import {
-  getServerSession,
-  type DefaultSession,
-  type NextAuthOptions,
-} from "next-auth";
-import { type Adapter } from "next-auth/adapters";
-import DiscordProvider from "next-auth/providers/discord";
+import { cache } from "react";
+import { Lucia } from "lucia";
+import { DrizzlePostgreSQLAdapter } from "@lucia-auth/adapter-drizzle";
+import { cookies } from "next/headers";
 
 import { env } from "~/env";
 import { db } from "~/server/db";
-import { createTable } from "~/server/db/schema";
+import { sessions, users } from "~/server/db/schema";
+
+export const adapter = new DrizzlePostgreSQLAdapter(db, sessions, users);
 
 /**
- * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
- * object and keep type safety.
+ * Module augmentation for `lucia` types. Allows us give type check from our config
  *
- * @see https://next-auth.js.org/getting-started/typescript#module-augmentation
+ * @see https://lucia-auth.com/basics/configuration
  */
-declare module "next-auth" {
-  interface Session extends DefaultSession {
-    user: {
-      id: string;
-      // ...other properties
-      // role: UserRole;
-    } & DefaultSession["user"];
+declare module "lucia" {
+  interface Register {
+    Lucia: typeof lucia;
+    DatabaseUserAttributes: DatabaseUserAttributes;
   }
+}
 
-  // interface User {
-  //   // ...other properties
-  //   // role: UserRole;
-  // }
+interface DatabaseUserAttributes {
+  id: string;
+  email: string;
+  image?: string;
 }
 
 /**
- * Options for NextAuth.js used to configure adapters, providers, callbacks, etc.
+ * Options for lucia used to configure adapters
  *
- * @see https://next-auth.js.org/configuration/options
+ * @see https://lucia-auth.com/getting-started/nextjs-app
  */
-export const authOptions: NextAuthOptions = {
-  callbacks: {
-    session: ({ session, user }) => ({
-      ...session,
-      user: {
-        ...session.user,
-        id: user.id,
-      },
-    }),
+export const lucia = new Lucia(adapter, {
+  sessionCookie: {
+    // this sets cookies with super long expiration
+    // since Next.js doesn't allow Lucia to extend cookie expiration when rendering pages
+    expires: false,
+    attributes: {
+      // set to `true` when using HTTPS
+      secure: env.NODE_ENV === "production",
+    },
   },
-  adapter: DrizzleAdapter(db, createTable) as Adapter,
-  providers: [
-    DiscordProvider({
-      clientId: env.DISCORD_CLIENT_ID,
-      clientSecret: env.DISCORD_CLIENT_SECRET,
-    }),
-    /**
-     * ...add more providers here.
-     *
-     * Most other providers require a bit more work than the Discord provider. For example, the
-     * GitHub provider requires you to add the `refresh_token_expires_in` field to the Account
-     * model. Refer to the NextAuth.js docs for the provider you want to use. Example:
-     *
-     * @see https://next-auth.js.org/providers/github
-     */
-  ],
-};
+  getUserAttributes: (attributes) => {
+    return {
+      id: attributes.id,
+      email: attributes.email,
+      image: attributes.image,
+    };
+  },
+});
 
 /**
- * Wrapper for `getServerSession` so that you don't need to import the `authOptions` in every file.
+ * Helper for get user info from session cookies.
  *
- * @see https://next-auth.js.org/configuration/nextjs
+ * @see https://lucia-auth.com/guides/validate-session-cookies/nextjs-app
  */
-export const getServerAuthSession = () => getServerSession(authOptions);
+export const getUser = cache(async () => {
+  const sessionId = cookies().get(lucia.sessionCookieName)?.value ?? null;
+  if (!sessionId) return null;
+  const { user, session } = await lucia.validateSession(sessionId);
+  try {
+    if (session?.fresh) {
+      const sessionCookie = lucia.createSessionCookie(session.id);
+      cookies().set(
+        sessionCookie.name,
+        sessionCookie.value,
+        sessionCookie.attributes,
+      );
+    }
+    if (!session) {
+      const sessionCookie = lucia.createBlankSessionCookie();
+      cookies().set(
+        sessionCookie.name,
+        sessionCookie.value,
+        sessionCookie.attributes,
+      );
+    }
+  } catch {
+    // Next.js throws error when attempting to set cookies when rendering page
+  }
+  return user;
+});
