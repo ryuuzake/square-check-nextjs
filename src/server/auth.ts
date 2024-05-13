@@ -1,11 +1,12 @@
-import { cache } from "react";
 import { Lucia } from "lucia";
 import { DrizzlePostgreSQLAdapter } from "@lucia-auth/adapter-drizzle";
-import { cookies } from "next/headers";
+import { z } from "zod";
+import { verify } from "@node-rs/argon2";
 
 import { env } from "~/env";
 import { db } from "~/server/db";
 import { sessions, users } from "~/server/db/schema";
+import { getUserByEmail } from "./db/users";
 
 export const adapter = new DrizzlePostgreSQLAdapter(db, sessions, users);
 
@@ -51,34 +52,75 @@ export const lucia = new Lucia(adapter, {
   },
 });
 
-/**
- * Helper for get user info from session cookies.
- *
- * @see https://lucia-auth.com/guides/validate-session-cookies/nextjs-app
- */
-export const getUser = cache(async () => {
-  const sessionId = cookies().get(lucia.sessionCookieName)?.value ?? null;
-  if (!sessionId) return null;
-  const { user, session } = await lucia.validateSession(sessionId);
-  try {
-    if (session?.fresh) {
-      const sessionCookie = lucia.createSessionCookie(session.id);
-      cookies().set(
-        sessionCookie.name,
-        sessionCookie.value,
-        sessionCookie.attributes,
-      );
-    }
-    if (!session) {
-      const sessionCookie = lucia.createBlankSessionCookie();
-      cookies().set(
-        sessionCookie.name,
-        sessionCookie.value,
-        sessionCookie.attributes,
-      );
-    }
-  } catch {
-    // Next.js throws error when attempting to set cookies when rendering page
-  }
-  return user;
+const emailPasswordSchema = z.object({
+  email: z.string().min(1).email(),
+  password: z.string().min(1),
 });
+
+export type AuthErrorType = "InvalidCredentials";
+
+export class AuthError extends Error {
+  public type: AuthErrorType;
+
+  constructor(message: string, type: AuthErrorType = "InvalidCredentials") {
+    super(message);
+    this.name = "AuthError";
+    this.type = type;
+  }
+}
+
+export const login = async (formData: FormData) => {
+  const { data, error } = await emailPasswordSchema.safeParseAsync(
+    Object.fromEntries(formData.entries()),
+  );
+
+  if (error) throw new AuthError("Invalid email or password");
+
+  const { email, password } = data;
+
+  const user = await getUserByEmail(db, email);
+
+  if (!user) {
+    // NOTE:
+    // Returning immediately allows malicious actors to figure out valid emails from response times,
+    // allowing them to only focus on guessing passwords in brute-force attacks.
+    // As a preventive measure, you may want to hash passwords even for invalid emails.
+    // However, valid emails can be already be revealed with the signup page
+    // and a similar timing issue can likely be found in password reset implementation.
+    // It will also be much more resource intensive.
+    // Since protecting against this is non-trivial,
+    // it is crucial your implementation is protected against brute-force attacks with login throttling etc.
+    // If emails/usernames are public, you may outright tell the user that the username is invalid.
+    throw new AuthError("Invalid email or password");
+  }
+
+  const validPassword = await verify(user.password, password, {
+    memoryCost: 19456,
+    timeCost: 2,
+    outputLen: 32,
+    parallelism: 1,
+  });
+  if (!validPassword) {
+    throw new AuthError("Invalid email or password");
+  }
+
+  try {
+    const session = await lucia.createSession(user.id, {
+      email: user.email,
+    });
+
+    const sessionCookie = lucia.createSessionCookie(session.id);
+
+    return sessionCookie;
+  } catch {
+    await lucia.invalidateUserSessions(user.id);
+
+    const session = await lucia.createSession(user.id, {
+      email: user.email,
+    });
+
+    const sessionCookie = lucia.createSessionCookie(session.id);
+
+    return sessionCookie;
+  }
+};

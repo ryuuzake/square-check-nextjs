@@ -14,7 +14,9 @@ const emailPasswordSchema = z.object({
 export async function POST(request: NextRequest) {
   const formData = await request.formData();
 
-  const { data, error } = await emailPasswordSchema.safeParseAsync(formData);
+  const { data, error } = await emailPasswordSchema.safeParseAsync(
+    Object.fromEntries(formData.entries()),
+  );
 
   if (error) {
     return new Response(error.message, {
@@ -40,7 +42,7 @@ export async function POST(request: NextRequest) {
       password: passwordHash,
     });
 
-    const session = await lucia.createSession(userId, { id: userId, email });
+    const session = await lucia.createSession(userId, { email });
     const sessionCookie = lucia.createSessionCookie(session.id);
 
     return new Response(null, {
@@ -50,7 +52,8 @@ export async function POST(request: NextRequest) {
         "Set-Cookie": sessionCookie.serialize(),
       },
     });
-  } catch {
+  } catch (e) {
+    console.error(e);
     // db error, email taken, etc
     return new Response("Email already used", {
       status: 400,

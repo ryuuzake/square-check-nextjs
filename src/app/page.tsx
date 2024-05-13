@@ -1,9 +1,9 @@
 import Link from "next/link";
 
-import { getUser } from "~/server/auth";
+import { validateRequest } from "./lib/actions/validateRequest";
 
 export default async function Home() {
-  const user = await getUser();
+  const { user } = await validateRequest();
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-b from-[#2e026d] to-[#15162c] text-white">
@@ -43,7 +43,7 @@ export default async function Home() {
               {user && <span>Logged in as {user.email}</span>}
             </p>
             <Link
-              href={user ? "/api/auth/signout" : "/api/auth/signin"}
+              href={user ? "/auth/logout" : "/auth/login"}
               className="rounded-full bg-white/10 px-10 py-3 font-semibold no-underline transition hover:bg-white/20"
             >
               {user ? "Sign out" : "Sign in"}
